@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}Панель управления{% endblock %}
+
+{% block content %}
+<h2>Добро пожаловать!</h2>
+<p>Вы можете загрузить подпись для анализа.</p>
+<a href="{{ url_for('upload') }}">Загрузить подпись</a>
+{% endblock %}

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block title %}Загрузить подпись{% endblock %}
+
+{% block content %}
+<h2>Загрузить подпись</h2>
+<form method="post" enctype="multipart/form-data">
+    <p><input type="file" name="signature_file" required></p>
+    <p><button type="submit">Отправить</button></p>
+</form>
+{% endblock %}

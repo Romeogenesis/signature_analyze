@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block title %}Результат проверки{% endblock %}
+
+{% block content %}
+<h2>Результат проверки</h2>
+{% if exists %}
+    <p style="color:green;">✅ Подпись найдена в базе данных.</p>
+{% else %}
+    <p style="color:red;">❌ Подпись не найдена или недействительна.</p>
+{% endif %}
+<a href="{{ url_for('upload') }}">Проверить другую подпись</a>
+{% endblock %}
