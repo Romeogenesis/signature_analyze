@@ -3,7 +3,40 @@
 {% block title %}Панель управления{% endblock %}
 
 {% block content %}
-<h2>Добро пожаловать!</h2>
-<p>Вы можете загрузить подпись для анализа.</p>
-<a href="{{ url_for('upload') }}">Загрузить подпись</a>
+<div class="card">
+    <h2>👋 Добро пожаловать!</h2>
+    <p style="font-size: 1.1rem; color: var(--text-light); margin-bottom: 2rem;">
+        Система анализа подписей на основе искусственного интеллекта готова к работе.
+    </p>
+    
+    <div class="dashboard-stats">
+        <div class="stat-card">
+            <div class="stat-number">📊</div>
+            <div class="stat-label">Точность анализа</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">⚡</div>
+            <div class="stat-label">Быстрая проверка</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">🔒</div>
+            <div class="stat-label">Безопасное хранение</div>
+        </div>
+    </div>
+    
+    <div style="margin-top: 2rem; text-align: center;">
+        <a href="{{ url_for('upload') }}" class="btn" style="font-size: 1.1rem; padding: 1rem 2.5rem;">
+            📤 Начать проверку подписей
+        </a>
+    </div>
+</div>
+
+<div class="card">
+    <h3>ℹ️ Как это работает</h3>
+    <ol style="margin-left: 1.5rem; line-height: 2;">
+        <li>Загрузите два файла с изображениями подписей</li>
+        <li>Нейросеть проанализирует обе подписи</li>
+        <li>Система выдаст процент схожести и вердикт</li>
+    </ol>
+</div>
 {% endblock %}

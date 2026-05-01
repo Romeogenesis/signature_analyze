@@ -3,11 +3,81 @@
 {% block title %}Результат проверки{% endblock %}
 
 {% block content %}
-<h2>Результат проверки</h2>
-{% if exists %}
-    <p style="color:green;">✅ Подпись найдена в базе данных.</p>
-{% else %}
-    <p style="color:red;">❌ Подпись не найдена или недействительна.</p>
-{% endif %}
-<a href="{{ url_for('upload') }}">Проверить другую подпись</a>
+<div class="card result-card">
+    {% if is_match %}
+        <div class="result-icon result-match">✅</div>
+        <h2 style="color: var(--success-green);">Подписи совпадают!</h2>
+    {% else %}
+        <div class="result-icon result-no-match">❌</div>
+        <h2 style="color: var(--error-red);">Подписи не совпадают</h2>
+    {% endif %}
+    
+    <div style="margin: 2rem 0;">
+        <p style="font-size: 1.2rem; margin-bottom: 1rem;">
+            <strong>Процент схожести:</strong> {{ similarity }}%
+        </p>
+        
+        <div class="similarity-bar">
+            <div class="similarity-fill" style="width: {{ similarity }}%;"></div>
+        </div>
+        
+        <p style="color: var(--text-light); margin-top: 1rem;">
+            Порог совпадения: {{ threshold }}%
+        </p>
+    </div>
+    
+    <div>
+        <span class="confidence-badge confidence-{{ confidence }}">
+            {% if confidence == 'high' %}
+                ✓ Высокая уверенность
+            {% elif confidence == 'medium' %}
+                ⚡ Средняя уверенность
+            {% else %}
+                ⚠ Низкая уверенность
+            {% endif %}
+        </span>
+    </div>
+    
+    <div style="margin-top: 2.5rem;">
+        <a href="{{ url_for('upload') }}" class="btn">
+            🔄 Проверить другие подписи
+        </a>
+    </div>
+</div>
+
+<div class="card">
+    <h3>📊 Детали анализа</h3>
+    <table style="width: 100%; border-collapse: collapse; margin-top: 1rem;">
+        <tr style="border-bottom: 1px solid var(--gray-200);">
+            <td style="padding: 0.75rem; font-weight: 600;">Результат</td>
+            <td style="padding: 0.75rem;">
+                {% if is_match %}
+                    <span style="color: var(--success-green);">✓ Совпадение найдено</span>
+                {% else %}
+                    <span style="color: var(--error-red);">✗ Совпадение не найдено</span>
+                {% endif %}
+            </td>
+        </tr>
+        <tr style="border-bottom: 1px solid var(--gray-200);">
+            <td style="padding: 0.75rem; font-weight: 600;">Схожесть</td>
+            <td style="padding: 0.75rem;">{{ similarity }}%</td>
+        </tr>
+        <tr style="border-bottom: 1px solid var(--gray-200);">
+            <td style="padding: 0.75rem; font-weight: 600;">Порог</td>
+            <td style="padding: 0.75rem;">{{ threshold }}%</td>
+        </tr>
+        <tr>
+            <td style="padding: 0.75rem; font-weight: 600;">Уверенность</td>
+            <td style="padding: 0.75rem;">
+                {% if confidence == 'high' %}
+                    Высокая
+                {% elif confidence == 'medium' %}
+                    Средняя
+                {% else %}
+                    Низкая
+                {% endif %}
+            </td>
+        </tr>
+    </table>
+</div>
 {% endblock %}

@@ -2,15 +2,19 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Анализ подписей{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
     <nav>
         {% if session.user_id %}
-            <a href="{{ url_for('index') }}">Главная</a> |
-            <a href="{{ url_for('upload') }}">Загрузить подпись</a> |
-            <a href="{{ url_for('logout') }}">Выйти</a>
+            <a href="{{ url_for('index') }}">🏠 Главная</a>
+            <a href="{{ url_for('upload') }}">📤 Загрузить подписи</a>
+            <a href="{{ url_for('logout') }}" style="float: right;">🚪 Выйти</a>
+        {% else %}
+            <a href="{{ url_for('login') }}">🔐 Вход</a>
+            <a href="{{ url_for('register') }}">📝 Регистрация</a>
         {% endif %}
     </nav>
 
@@ -27,5 +31,9 @@
 
         {% block content %}{% endblock %}
     </div>
+
+    <footer class="footer">
+        <p>&copy; 2024 Система анализа подписей. Все права защищены.</p>
+    </footer>
 </body>
-</html>                     
+</html>
