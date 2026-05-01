@@ -1,11 +1,36 @@
 {% extends "base.html" %}
 
-{% block title %}Загрузить подпись{% endblock %}
+{% block title %}Загрузить подписи{% endblock %}
 
 {% block content %}
-<h2>Загрузить подпись</h2>
-<form method="post" enctype="multipart/form-data">
-    <p><input type="file" name="signature_file" required></p>
-    <p><button type="submit">Отправить</button></p>
-</form>
+<div class="card">
+    <h2>📤 Загрузка подписей для сравнения</h2>
+    <p style="color: var(--text-light); margin-bottom: 2rem;">
+        Загрузите два файла с изображениями подписей. Система сравнит их и выдаст результат.
+    </p>
+    
+    <form method="post" enctype="multipart/form-data">
+        <div class="file-upload-area">
+            <label for="signature_file_1" style="cursor: pointer;">
+                <div style="font-size: 3rem; margin-bottom: 1rem;">📄</div>
+                <strong>Первая подпись</strong>
+                <p style="margin-top: 0.5rem; color: var(--text-light);">PNG, JPG или другой формат изображения</p>
+            </label>
+            <input type="file" id="signature_file_1" name="signature_file_1" accept="image/*" required style="margin-top: 1rem;">
+        </div>
+        
+        <div class="file-upload-area">
+            <label for="signature_file_2" style="cursor: pointer;">
+                <div style="font-size: 3rem; margin-bottom: 1rem;">📄</div>
+                <strong>Вторая подпись</strong>
+                <p style="margin-top: 0.5rem; color: var(--text-light);">PNG, JPG или другой формат изображения</p>
+            </label>
+            <input type="file" id="signature_file_2" name="signature_file_2" accept="image/*" required style="margin-top: 1rem;">
+        </div>
+        
+        <button type="submit" style="width: 100%; font-size: 1.1rem;">
+            🔍 Проверить подписи
+        </button>
+    </form>
+</div>
 {% endblock %}

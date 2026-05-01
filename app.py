@@ -1,7 +1,8 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, session
 from config import Config
 from models.signature_db import db, User, Signature
-from services.signature_verification import verify_signature_from_db
+from services.signature_verification import verify_two_signatures
+import base64
 
 def create_app():
     app = Flask(__name__)
@@ -10,9 +11,15 @@ def create_app():
     # Инициализация базы данных
     db.init_app(app)
 
-    # Создание таблиц
+    # Создание таблиц и тестового пользователя
     with app.app_context():
         db.create_all()
+        # Создаем тестового пользователя если не существует
+        if not User.query.filter_by(username='admin').first():
+            admin = User(username='admin')
+            admin.set_password('admin123')
+            db.session.add(admin)
+            db.session.commit()
 
     @app.route('/')
     def index():
@@ -28,8 +35,8 @@ def create_app():
 
             user = User.query.filter_by(username=username).first()
             
-            # Простая проверка (в реальном мире используйте hash!)
-            if user and user.password == password:
+            # Проверка пароля с использованием хэша
+            if user and user.check_password(password):
                 session['user_id'] = user.id
                 return redirect(url_for('index'))
             else:
@@ -37,29 +44,70 @@ def create_app():
         
         return render_template('login.html')
 
+    @app.route('/register', methods=['GET', 'POST'])
+    def register():
+        if request.method == 'POST':
+            username = request.form['username']
+            password = request.form['password']
+            confirm_password = request.form['confirm_password']
+
+            if password != confirm_password:
+                flash('Пароли не совпадают.')
+                return render_template('register.html')
+
+            if User.query.filter_by(username=username).first():
+                flash('Пользователь с таким именем уже существует.')
+                return render_template('register.html')
+
+            user = User(username=username)
+            user.set_password(password)
+            db.session.add(user)
+            db.session.commit()
+
+            flash('Регистрация успешна! Теперь вы можете войти.')
+            return redirect(url_for('login'))
+
+        return render_template('register.html')
+
     @app.route('/upload', methods=['GET', 'POST'])
     def upload():
         if 'user_id' not in session:
             return redirect(url_for('login'))
 
         if request.method == 'POST':
-            file = request.files.get('signature_file')
-            if file and file.filename != '':
-                # Здесь мы имитируем "анализ" подписи
-                # В реальности, файл может быть передан в ИИ-модуль
-                signature_data = file.read().decode('utf-8')
+            file1 = request.files.get('signature_file_1')
+            file2 = request.files.get('signature_file_2')
+            
+            if file1 and file2 and file1.filename != '' and file2.filename != '':
+                # Читаем данные файлов
+                file1_data = base64.b64encode(file1.read()).decode('utf-8')
+                file2_data = base64.b64encode(file2.read()).decode('utf-8')
                 
-                # Сохраняем подпись в базу
-                new_signature = Signature(data=signature_data, verified=False)
-                db.session.add(new_signature)
+                # Сохраняем подписи в базу
+                sig1 = Signature(
+                    data=file1_data[:500],  # Сохраняем часть данных для истории
+                    verified=True,
+                    user_id=session['user_id']
+                )
+                sig2 = Signature(
+                    data=file2_data[:500],
+                    verified=True,
+                    user_id=session['user_id']
+                )
+                db.session.add(sig1)
+                db.session.add(sig2)
                 db.session.commit()
 
-                # Проверяем подпись (пока без ИИ)
-                exists_in_db = verify_signature_from_db(signature_data)
+                # Проверяем подписи с помощью ИИ
+                result = verify_two_signatures(file1_data, file2_data)
 
-                return render_template('result.html', exists=exists_in_db)
+                return render_template('result.html', 
+                                       is_match=result['is_match'],
+                                       similarity=result['similarity'],
+                                       threshold=result['threshold'],
+                                       confidence=result['confidence'])
             else:
-                flash('Файл не выбран.')
+                flash('Оба файла должны быть выбраны.')
 
         return render_template('upload.html')
 
