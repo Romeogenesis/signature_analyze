@@ -1,380 +1,235 @@
+#!/usr/bin/env python3
 """
-Siamese Network для сравнения подписей.
-Использует архитектуру на основе CNN с контрастивной функцией потерь.
+Скрипт для обучения Siamese-сети для сравнения подписей.
+
+Использование:
+    python ai/train_siamese.py --data_dir data/signatures --epochs 50 --batch_size 32
+
+Требования:
+    - PyTorch
+    - OpenCV (cv2)
+    - tqdm (для прогресс-бара)
 """
 
+import os
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, models
-from PIL import Image
-import os
-import numpy as np
-from pathlib import Path
-import matplotlib.pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-import pickle
+import numpy as np
+import torch.nn.functional as F
 
-
-class SignatureDataset(Dataset):
-    """
-    Датасет для обучения Siamese сети.
-    Ожидает структуру папок:
-    data/train/
-        person_001/
-            sig_001.png
-            sig_002.png
-        person_002/
-            sig_001.png
-            ...
-    """
-    
-    def __init__(self, root_dir, transform=None, pairs_count=1000):
-        self.root_dir = Path(root_dir)
-        self.transform = transform
-        self.pairs_count = pairs_count
-        
-        # Собираем все изображения по людям
-        self.persons = {}
-        for person_folder in self.root_dir.iterdir():
-            if person_folder.is_dir():
-                person_id = person_folder.name
-                images = list(person_folder.glob('*.png')) + \
-                         list(person_folder.glob('*.jpg')) + \
-                         list(person_folder.glob('*.jpeg'))
-                if images:
-                    self.persons[person_id] = images
-        
-        self.person_ids = list(self.persons.keys())
-        
-    def __len__(self):
-        return self.pairs_count
-    
-    def __getitem__(self, idx):
-        # Генерируем пару: 50% одинаковые подписи, 50% разные
-        if np.random.random() < 0.5:
-            # Одинаковая подпись (от одного человека)
-            person_id = np.random.choice(self.person_ids)
-            images = self.persons[person_id]
-            
-            if len(images) >= 2:
-                img1_path, img2_path = np.random.choice(images, 2, replace=False)
-            else:
-                # Если только одно изображение, используем его дважды с небольшим аугментированием
-                img1_path = images[0]
-                img2_path = images[0]
-            
-            label = 1.0  # Одинаковые
-        else:
-            # Разные подписи (от разных людей)
-            person1_id, person2_id = np.random.choice(self.person_ids, 2, replace=False)
-            img1_path = np.random.choice(self.persons[person1_id])
-            img2_path = np.random.choice(self.persons[person2_id])
-            label = 0.0  # Разные
-        
-        # Загружаем изображения
-        img1 = Image.open(img1_path).convert('L')  # Чёрно-белое
-        img2 = Image.open(img2_path).convert('L')
-        
-        if self.transform:
-            img1 = self.transform(img1)
-            img2 = self.transform(img2)
-        
-        return img1, img2, torch.tensor(label, dtype=torch.float32)
-
-
-class SiameseNetwork(nn.Module):
-    """
-    Siamese сеть на основе предобученной ResNet18.
-    """
-    
-    def __init__(self, embedding_dim=128):
-        super(SiameseNetwork, self).__init__()
-        
-        # Берём предобученную ResNet18 и удаляем последние слои
-        resnet = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
-        
-        # Удаляем полностью связанные слои и пулинг
-        modules = list(resnet.children())[:-2]  # Убираем avgpool и fc
-        
-        self.feature_extractor = nn.Sequential(*modules)
-        
-        # Адаптивный пулинг для фиксированного размера
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
-        
-        # Полностью связанные слои для эмбеддинга
-        self.embedding = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
-            nn.Linear(256, embedding_dim),
-            nn.BatchNorm1d(embedding_dim)
-        )
-        
-    def forward_once(self, x):
-        """Прямой проход через сеть для одного изображения"""
-        x = self.feature_extractor(x)
-        x = self.adaptive_pool(x)
-        x = self.embedding(x)
-        # Нормализуем эмбеддинг
-        x = torch.nn.functional.normalize(x, p=2, dim=1)
-        return x
-    
-    def forward(self, x1, x2):
-        """Прямой проход для пары изображений"""
-        embedding1 = self.forward_once(x1)
-        embedding2 = self.forward_once(x2)
-        return embedding1, embedding2
+from siamese_network import SiameseNetwork
+from dataset import SignatureDataset, create_data_loader
 
 
 class ContrastiveLoss(nn.Module):
     """
-    Контрастивная функция потерь для Siamese сети.
-    """
+    Contrastive Loss для обучения Siamese-сети.
     
+    L = (1-Y) * 0.5 * D^2 + Y * 0.5 * max(0, margin - D)^2
+    где Y=0 для одинаковых пар, Y=1 для разных пар
+    """
     def __init__(self, margin=1.0):
         super(ContrastiveLoss, self).__init__()
         self.margin = margin
     
-    def forward(self, embedding1, embedding2, label):
+    def forward(self, output1, output2, label):
         # Евклидово расстояние между эмбеддингами
-        distance = torch.nn.functional.pairwise_distance(embedding1, embedding2)
+        distance = F.pairwise_distance(output1, output2)
         
-        # Loss = label * distance^2 + (1 - label) * max(0, margin - distance)^2
-        loss = label * (distance ** 2) + \
-               (1 - label) * torch.clamp(self.margin - distance, min=0.0) ** 2
+        loss = (1 - label) * torch.pow(distance, 2) + \
+               label * torch.pow(torch.clamp(self.margin - distance, min=0.0), 2)
         
         return loss.mean()
 
 
-def train_model(
-    train_dir='data/train',
-    val_dir='data/val',
-    model_save_path='models/signature_siamese.pth',
-    epochs=50,
-    batch_size=32,
-    learning_rate=0.001,
-    embedding_dim=128,
-    image_size=224
-):
-    """
-    Обучение Siamese сети для сравнения подписей.
-    """
+def train_epoch(model, dataloader, criterion, optimizer, device, epoch, writer):
+    """Обучение за одну эпоху"""
+    model.train()
+    total_loss = 0.0
+    correct = 0
+    total = 0
     
+    pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
+    
+    for batch_idx, (img1, img2, labels) in enumerate(pbar):
+        img1, img2, labels = img1.to(device), img2.to(device), labels.to(device)
+        
+        optimizer.zero_grad()
+        
+        # Прямой проход
+        output1, output2 = model(img1, img2)
+        
+        # Вычисление потерь
+        loss = criterion(output1, output2, labels)
+        
+        # Обратный проход
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        
+        # Вычисление точности (порог 0.5 для косинусного сходства)
+        with torch.no_grad():
+            similarity = nn.functional.cosine_similarity(output1, output2)
+            predictions = (similarity > 0.5).float()
+            correct += (predictions == labels).sum().item()
+            total += labels.size(0)
+        
+        pbar.set_postfix({
+            'loss': f'{loss.item():.4f}',
+            'acc': f'{100. * correct / total:.2f}%'
+        })
+    
+    avg_loss = total_loss / len(dataloader)
+    accuracy = 100. * correct / total
+    
+    # Логирование в TensorBoard
+    writer.add_scalar('Loss/train', avg_loss, epoch)
+    writer.add_scalar('Accuracy/train', accuracy, epoch)
+    
+    return avg_loss, accuracy
+
+
+def validate(model, dataloader, criterion, device, epoch, writer):
+    """Валидация"""
+    model.eval()
+    total_loss = 0.0
+    correct = 0
+    total = 0
+    
+    with torch.no_grad():
+        pbar = tqdm(dataloader, desc=f'Valid {epoch}')
+        
+        for img1, img2, labels in pbar:
+            img1, img2, labels = img1.to(device), img2.to(device), labels.to(device)
+            
+            output1, output2 = model(img1, img2)
+            loss = criterion(output1, output2, labels)
+            
+            total_loss += loss.item()
+            
+            similarity = nn.functional.cosine_similarity(output1, output2)
+            predictions = (similarity > 0.5).float()
+            correct += (predictions == labels).sum().item()
+            total += labels.size(0)
+    
+    avg_loss = total_loss / len(dataloader)
+    accuracy = 100. * correct / total
+    
+    writer.add_scalar('Loss/val', avg_loss, epoch)
+    writer.add_scalar('Accuracy/val', accuracy, epoch)
+    
+    return avg_loss, accuracy
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Обучение Siamese-сети для сравнения подписей')
+    parser.add_argument('--data_dir', type=str, default='data/signatures',
+                        help='Путь к датасету с подписями')
+    parser.add_argument('--model_path', type=str, default='ai/models/siamese_model.pth',
+                        help='Путь для сохранения модели')
+    parser.add_argument('--epochs', type=int, default=50,
+                        help='Количество эпох обучения')
+    parser.add_argument('--batch_size', type=int, default=32,
+                        help='Размер батча')
+    parser.add_argument('--lr', type=float, default=0.001,
+                        help='Learning rate')
+    parser.add_argument('--margin', type=float, default=1.0,
+                        help='Margin для contrastive loss')
+    parser.add_argument('--embedding_dim', type=int, default=128,
+                        help='Размерность эмбеддинга')
+    parser.add_argument('--num_workers', type=int, default=4,
+                        help='Количество воркеров для загрузки данных')
+    parser.add_argument('--log_dir', type=str, default='ai/logs',
+                        help='Путь для логов TensorBoard')
+    
+    args = parser.parse_args()
+    
+    # Проверка наличия данных
+    if not os.path.exists(args.data_dir):
+        print(f"Ошибка: Датасет не найден по пути {args.data_dir}")
+        print("Создайте структуру папок:")
+        print("  data/signatures/")
+        print("    person_001/")
+        print("      sig_001.png")
+        print("      sig_002.png")
+        print("    person_002/")
+        print("      ...")
+        return
+    
+    # Создание директорий
+    os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
+    
+    # Определение устройства
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Используемое устройство: {device}")
     
-    # Трансформации для аугментации данных
-    train_transform = transforms.Compose([
-        transforms.Resize((image_size, image_size)),
-        transforms.RandomRotation(10),
-        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
-        transforms.GaussianBlur(kernel_size=(3, 7), sigma=(0.1, 2.0)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485], std=[0.229])  # Для одноканального изображения
-    ])
+    # Загрузка данных
+    print("Загрузка датасета...")
+    full_dataset = SignatureDataset(args.data_dir, augment=False)
     
-    val_transform = transforms.Compose([
-        transforms.Resize((image_size, image_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485], std=[0.229])
-    ])
+    # Разделение на train/val (80/20)
+    train_size = int(0.8 * len(full_dataset))
+    val_size = len(full_dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        full_dataset, [train_size, val_size]
+    )
     
-    # Создаём датасеты
-    print("Загрузка тренировочных данных...")
-    train_dataset = SignatureDataset(train_dir, transform=train_transform, pairs_count=5000)
-    print(f"Количество людей в тренировочном наборе: {len(train_dataset.person_ids)}")
+    # Аугментация для тренировочной выборки
+    train_dataset.dataset.augment = True
     
-    print("Загрузкa валидационных данных...")
-    val_dataset = SignatureDataset(val_dir, transform=val_transform, pairs_count=1000)
-    print(f"Количество людей в валидационном наборе: {len(val_dataset.person_ids)}")
+    train_loader = create_data_loader(train_dataset, args.batch_size, shuffle=True, 
+                                       num_workers=args.num_workers)
+    val_loader = create_data_loader(val_dataset, args.batch_size, shuffle=False,
+                                     num_workers=args.num_workers)
     
-    # Создаём dataloaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+    # Инициализация модели
+    print("Инициализация модели...")
+    model = SiameseNetwork(embedding_dim=args.embedding_dim).to(device)
     
-    # Инициализируем модель
-    model = SiameseNetwork(embedding_dim=embedding_dim).to(device)
-    criterion = ContrastiveLoss(margin=1.0)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+    # Loss и оптимизатор
+    criterion = ContrastiveLoss(margin=args.margin)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', 
+                                                      factor=0.5, patience=5)
     
-    # Трекинг метрик
-    train_losses = []
-    val_losses = []
-    best_val_loss = float('inf')
+    # TensorBoard
+    writer = SummaryWriter(args.log_dir)
     
-    print(f"\nНачало обучения на {epochs} эпох...")
-    print("=" * 60)
+    # Обучение
+    print("Начало обучения...")
+    best_val_acc = 0.0
     
-    for epoch in range(epochs):
-        # Тренировка
-        model.train()
-        running_train_loss = 0.0
+    for epoch in range(1, args.epochs + 1):
+        train_loss, train_acc = train_epoch(model, train_loader, criterion, 
+                                            optimizer, device, epoch, writer)
+        val_loss, val_acc = validate(model, val_loader, criterion, device, epoch, writer)
         
-        for img1, img2, labels in tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs} [Train]'):
-            img1, img2, labels = img1.to(device), img2.to(device), labels.to(device)
-            
-            optimizer.zero_grad()
-            embedding1, embedding2 = model(img1, img2)
-            loss = criterion(embedding1, embedding2, labels)
-            loss.backward()
-            optimizer.step()
-            
-            running_train_loss += loss.item()
+        scheduler.step(val_loss)
         
-        avg_train_loss = running_train_loss / len(train_loader)
-        train_losses.append(avg_train_loss)
-        
-        # Валидация
-        model.eval()
-        running_val_loss = 0.0
-        
-        with torch.no_grad():
-            for img1, img2, labels in tqdm(val_loader, desc=f'Epoch {epoch+1}/{epochs} [Val]'):
-                img1, img2, labels = img1.to(device), img2.to(device), labels.to(device)
-                
-                embedding1, embedding2 = model(img1, img2)
-                loss = criterion(embedding1, embedding2, labels)
-                running_val_loss += loss.item()
-        
-        avg_val_loss = running_val_loss / len(val_loader)
-        val_losses.append(avg_val_loss)
-        
-        # Шаг планировщика
-        scheduler.step(avg_val_loss)
+        print(f'Epoch {epoch}: Train Loss={train_loss:.4f}, Train Acc={train_acc:.2f}%, '
+              f'Val Loss={val_loss:.4f}, Val Acc={val_acc:.2f}%')
         
         # Сохранение лучшей модели
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': avg_train_loss,
-                'val_loss': avg_val_loss,
-                'embedding_dim': embedding_dim,
-                'image_size': image_size
-            }, model_save_path)
-            print(f"✓ Лучшая модель сохранена! Val Loss: {avg_val_loss:.4f}")
-        
-        print(f"Epoch {epoch+1}/{epochs} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.6f}")
-        print("-" * 60)
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            model.save(args.model_path)
+            print(f'  -> Сохранена лучшая модель с точностью {val_acc:.2f}%')
     
-    # Сохраняем историю обучения
-    history = {
-        'train_losses': train_losses,
-        'val_losses': val_losses,
-        'best_val_loss': best_val_loss,
-        'epochs': epochs
-    }
+    writer.close()
     
-    with open('models/training_history.pkl', 'wb') as f:
-        pickle.dump(history, f)
-    
-    # Построение графиков
-    plt.figure(figsize=(12, 5))
-    
-    plt.subplot(1, 2, 1)
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Val Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training & Validation Loss')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    plt.subplot(1, 2, 2)
-    plt.plot(np.diff(train_losses), label='Train Δ')
-    plt.plot(np.diff(val_losses), label='Val Δ')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss Change')
-    plt.title('Loss Convergence')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig('models/training_curves.png', dpi=150)
-    plt.close()
-    
-    print(f"\n✅ Обучение завершено!")
-    print(f"📊 Лучший validation loss: {best_val_loss:.4f}")
-    print(f"💾 Модель сохранена в: {model_save_path}")
-    print(f"📈 График обучения сохранён в: models/training_curves.png")
-    
-    return model, history
+    print(f"\nОбучение завершено!")
+    print(f"Лучшая точность валидации: {best_val_acc:.2f}%")
+    print(f"Модель сохранена в: {args.model_path}")
+    print(f"Логи TensorBoard: {args.log_dir}")
+    print("\nДля запуска веб-приложения выполните:")
+    print("  python app.py")
 
 
 if __name__ == '__main__':
-    # Проверка наличия данных
-    train_path = Path('data/train')
-    val_path = Path('data/val')
-    
-    if not train_path.exists() or not any(train_path.iterdir()):
-        print("⚠️  Предупреждение: Папка data/train пуста или не существует!")
-        print("Создам тестовые данные для демонстрации...")
-        
-        # Создадим фейковые данные для теста
-        from PIL import Image, ImageDraw, ImageFont
-        
-        def create_fake_signature(text, seed, output_path):
-            np.random.seed(seed)
-            img = Image.new('RGB', (300, 150), color='white')
-            draw = ImageDraw.Draw(img)
-            
-            # Рисуем "подпись" как случайные линии
-            points = []
-            for i in range(50):
-                x = np.random.randint(20, 280)
-                y = np.random.randint(30, 120) + np.sin(i * 0.2) * 20
-                points.append((x, y))
-            
-            if len(points) > 1:
-                draw.line(points, fill='black', width=2)
-            
-            # Добавим текст
-            try:
-                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuScript.ttf", 30)
-            except:
-                font = ImageFont.load_default()
-            
-            draw.text((50, 60), text, fill='black', font=font)
-            
-            # Добавим шум
-            pixels = img.load()
-            for i in range(img.width):
-                for j in range(img.height):
-                    if np.random.random() < 0.02:
-                        pixels[i, j] = (np.random.randint(0, 50),) * 3
-            
-            img.save(output_path)
-        
-        # Создадим структуры папок
-        for split in ['train', 'val']:
-            split_path = Path(f'data/{split}')
-            split_path.mkdir(parents=True, exist_ok=True)
-            
-            for person_idx in range(10):  # 10 человек
-                person_folder = split_path / f'person_{person_idx:03d}'
-                person_folder.mkdir(exist_ok=True)
-                
-                # Создадим 5 подписей для каждого человека
-                for sig_idx in range(5):
-                    filename = person_folder / f'sig_{sig_idx:03d}.png'
-                    create_fake_signature(f'Person {person_idx}', person_idx * 100 + sig_idx, filename)
-        
-        print("✓ Тестовые данные созданы!")
-    
-    # Запуск обучения
-    model, history = train_model(
-        train_dir='data/train',
-        val_dir='data/val',
-        model_save_path='models/signature_siamese.pth',
-        epochs=50,  # Можно увеличить до 100-200 для лучшего качества
-        batch_size=32,
-        learning_rate=0.001,
-        embedding_dim=128,
-        image_size=224
-    )
+    main()

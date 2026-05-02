@@ -1,15 +1,18 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, session
+import os
+import base64
+
 from config import Config
 from models.signature_db import db, User, Signature
-import base64
 
 # Импорт сервиса верификации подписей на основе Siamese сети
 try:
-    from ai.signature_verifier import get_verifier
+    from ai.signature_verifier import verify_signatures
     AI_AVAILABLE = True
-except (ImportError, FileNotFoundError):
+except (ImportError, FileNotFoundError) as e:
     AI_AVAILABLE = False
-    print("⚠️  AI-сервис недоступен. Запустите сначала: python ai/train_siamese.py")
+    print(f"⚠️  AI-сервис недоступен: {e}")
+    print("Запустите сначала: python ai/train_siamese.py")
 
 def create_app():
     app = Flask(__name__)
@@ -86,7 +89,19 @@ def create_app():
             file2 = request.files.get('signature_file_2')
             
             if file1 and file2 and file1.filename != '' and file2.filename != '':
-                # Читаем данные файлов
+                # Сохраняем файлы во временную директорию
+                upload_folder = 'uploads'
+                os.makedirs(upload_folder, exist_ok=True)
+                
+                file1_path = os.path.join(upload_folder, f"temp_{session['user_id']}_1.png")
+                file2_path = os.path.join(upload_folder, f"temp_{session['user_id']}_2.png")
+                
+                file1.save(file1_path)
+                file2.save(file2_path)
+                
+                # Читаем данные для сохранения в БД
+                file1.seek(0)
+                file2.seek(0)
                 file1_data = base64.b64encode(file1.read()).decode('utf-8')
                 file2_data = base64.b64encode(file2.read()).decode('utf-8')
                 
@@ -106,23 +121,42 @@ def create_app():
                 db.session.commit()
 
                 # Проверяем подписи с помощью ИИ
+                result = None
                 if AI_AVAILABLE:
-                    verifier = get_verifier('models/signature_siamese.pth')
-                    result = verifier.verify_signatures_from_bytes(
-                        base64.b64decode(file1_data),
-                        base64.b64decode(file2_data)
-                    )
-                else:
+                    try:
+                        model_path = 'ai/models/siamese_model.pth'
+                        result = verify_signatures(file1_path, file2_path, model_path=model_path)
+                    except Exception as e:
+                        flash(f'Ошибка при проверке нейросетью: {e}')
+                        result = None
+                
+                if result is None:
                     # Резервный эвристический метод если модель не обучена
                     from services.signature_verification import verify_two_signatures
                     result = verify_two_signatures(file1_data, file2_data)
-                    result['similarity'] = result.get('similarity', 50.0)
-                    result['threshold'] = result.get('threshold', 50.0)
+                    # Преобразуем формат результата
+                    if 'threshold' in result:
+                        result['similarity'] = result.get('similarity', 50.0)
+                        result['is_match'] = result['similarity'] >= result.get('threshold', 50.0)
+                    if 'confidence' not in result:
+                        if result['similarity'] >= 85:
+                            result['confidence'] = 'high'
+                        elif result['similarity'] >= 70:
+                            result['confidence'] = 'medium'
+                        else:
+                            result['confidence'] = 'low'
+
+                # Удаляем временные файлы
+                try:
+                    os.remove(file1_path)
+                    os.remove(file2_path)
+                except:
+                    pass
 
                 return render_template('result.html', 
                                        is_match=result['is_match'],
                                        similarity=result['similarity'],
-                                       threshold=result['threshold'],
+                                       threshold=result.get('threshold', 70.0),
                                        confidence=result['confidence'])
             else:
                 flash('Оба файла должны быть выбраны.')
