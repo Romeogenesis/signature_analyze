@@ -1,175 +1,195 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, session
 import os
-import base64
+import sqlite3
+import hashlib
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
+import cv2
+import numpy as np
+import tensorflow as tf
 
-from config import Config
-from models.signature_db import db, User, Signature
+# Настройка приложения
+app = Flask(__name__)
+app.secret_key = os.urandom(24)
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
+app.config['MODEL_PATH'] = 'signature_model.keras'
 
-# Импорт сервиса верификации подписей на основе Siamese сети
-try:
-    from ai.signature_verifier import verify_signatures
-    AI_AVAILABLE = True
-except (ImportError, FileNotFoundError) as e:
-    AI_AVAILABLE = False
-    print(f"⚠️  AI-сервис недоступен: {e}")
-    print("Запустите сначала: python ai/train_siamese.py")
+# Создаем папку для загрузок
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-def create_app():
-    app = Flask(__name__)
-    app.config.from_object(Config)
+# Глобальная переменная для модели
+model = None
 
-    # Инициализация базы данных
-    db.init_app(app)
+def load_model():
+    global model
+    try:
+        print("Загрузка модели...")
+        # Загружаем модель. Так как мы убрали Lambda с функцией, safe_mode больше не нужен.
+        model = tf.keras.models.load_model(app.config['MODEL_PATH'])
+        print("✅ Модель успешно загружена!")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка загрузки модели: {e}")
+        return False
 
-    # Создание таблиц и тестового пользователя
-    with app.app_context():
-        db.create_all()
-        # Создаем тестового пользователя если не существует
-        if not User.query.filter_by(username='admin').first():
-            admin = User(username='admin')
-            admin.set_password('admin123')
-            db.session.add(admin)
-            db.session.commit()
+# Загружаем модель при старте
+if os.path.exists(app.config['MODEL_PATH']):
+    load_model()
+else:
+    print("⚠️ Файл модели не найден. Запустите сначала train_model.py")
 
-    @app.route('/')
-    def index():
-        if 'user_id' not in session:
-            return redirect(url_for('login'))
-        return render_template('dashboard.html')
+# База данных
+DB_NAME = 'users.db'
 
-    @app.route('/login', methods=['GET', 'POST'])
-    def login():
-        if request.method == 'POST':
-            username = request.form['username']
-            password = request.form['password']
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL
+                )''')
+    # Создаем админа по умолчанию если нет
+    c.execute("SELECT * FROM users WHERE username = ?", ('admin',))
+    if not c.fetchone():
+        pwd_hash = generate_password_hash('admin123')
+        c.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", ('admin', pwd_hash))
+        print("Создан пользователь по умолчанию: admin / admin123")
+    conn.commit()
+    conn.close()
 
-            user = User.query.filter_by(username=username).first()
-            
-            # Проверка пароля с использованием хэша
-            if user and user.check_password(password):
-                session['user_id'] = user.id
-                return redirect(url_for('index'))
-            else:
-                flash('Неверный логин или пароль.')
+init_db()
+
+def preprocess_image(file_path):
+    """Обработка изображения для модели."""
+    img = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None
+    img = cv2.resize(img, (150, 150))
+    img = img.astype(np.float32) / 255.0
+    img = np.expand_dims(img, axis=-1)
+    img = np.expand_dims(img, axis=0)  # Добавляем размерность батча
+    return img
+
+@app.route('/')
+def index():
+    if 'user_id' in session:
+        return redirect(url_for('dashboard'))
+    return render_template('login.html')
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
         
-        return render_template('login.html')
-
-    @app.route('/register', methods=['GET', 'POST'])
-    def register():
-        if request.method == 'POST':
-            username = request.form['username']
-            password = request.form['password']
-            confirm_password = request.form['confirm_password']
-
-            if password != confirm_password:
-                flash('Пароли не совпадают.')
-                return render_template('register.html')
-
-            if User.query.filter_by(username=username).first():
-                flash('Пользователь с таким именем уже существует.')
-                return render_template('register.html')
-
-            user = User(username=username)
-            user.set_password(password)
-            db.session.add(user)
-            db.session.commit()
-
-            flash('Регистрация успешна! Теперь вы можете войти.')
-            return redirect(url_for('login'))
-
-        return render_template('register.html')
-
-    @app.route('/upload', methods=['GET', 'POST'])
-    def upload():
-        if 'user_id' not in session:
-            return redirect(url_for('login'))
-
-        if request.method == 'POST':
-            file1 = request.files.get('signature_file_1')
-            file2 = request.files.get('signature_file_2')
-            
-            if file1 and file2 and file1.filename != '' and file2.filename != '':
-                # Сохраняем файлы во временную директорию
-                upload_folder = 'uploads'
-                os.makedirs(upload_folder, exist_ok=True)
-                
-                file1_path = os.path.join(upload_folder, f"temp_{session['user_id']}_1.png")
-                file2_path = os.path.join(upload_folder, f"temp_{session['user_id']}_2.png")
-                
-                file1.save(file1_path)
-                file2.save(file2_path)
-                
-                # Читаем данные для сохранения в БД
-                file1.seek(0)
-                file2.seek(0)
-                file1_data = base64.b64encode(file1.read()).decode('utf-8')
-                file2_data = base64.b64encode(file2.read()).decode('utf-8')
-                
-                # Сохраняем подписи в базу
-                sig1 = Signature(
-                    data=file1_data[:500],  # Сохраняем часть данных для истории
-                    verified=True,
-                    user_id=session['user_id']
-                )
-                sig2 = Signature(
-                    data=file2_data[:500],
-                    verified=True,
-                    user_id=session['user_id']
-                )
-                db.session.add(sig1)
-                db.session.add(sig2)
-                db.session.commit()
-
-                # Проверяем подписи с помощью ИИ
-                result = None
-                if AI_AVAILABLE:
-                    try:
-                        model_path = 'signature_model.keras'
-                        result = verify_signatures(file1_path, file2_path, model_path=model_path)
-                    except Exception as e:
-                        flash(f'Ошибка при проверке нейросетью: {e}')
-                        result = None
-                
-                if result is None:
-                    # Резервный эвристический метод если модель не обучена
-                    from services.signature_verification import verify_two_signatures
-                    result = verify_two_signatures(file1_data, file2_data)
-                    # Преобразуем формат результата
-                    if 'threshold' in result:
-                        result['similarity'] = result.get('similarity', 50.0)
-                        result['is_match'] = result['similarity'] >= result.get('threshold', 50.0)
-                    if 'confidence' not in result:
-                        if result['similarity'] >= 85:
-                            result['confidence'] = 'high'
-                        elif result['similarity'] >= 70:
-                            result['confidence'] = 'medium'
-                        else:
-                            result['confidence'] = 'low'
-
-                # Удаляем временные файлы
-                try:
-                    os.remove(file1_path)
-                    os.remove(file2_path)
-                except:
-                    pass
-
-                return render_template('result.html', 
-                                       is_match=result['is_match'],
-                                       similarity=result['similarity'],
-                                       threshold=result.get('threshold', 70.0),
-                                       confidence=result['confidence'])
-            else:
-                flash('Оба файла должны быть выбраны.')
-
-        return render_template('upload.html')
-
-    @app.route('/logout')
-    def logout():
-        session.pop('user_id', None)
+        if not username or not password:
+            flash('Введите имя и пароль', 'error')
+            return redirect(url_for('register'))
+        
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE username = ?", (username,))
+        if c.fetchone():
+            conn.close()
+            flash('Пользователь уже существует', 'error')
+            return redirect(url_for('register'))
+        
+        pwd_hash = generate_password_hash(password)
+        c.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, pwd_hash))
+        conn.commit()
+        conn.close()
+        
+        flash('Регистрация успешна! Войдите.', 'success')
         return redirect(url_for('login'))
+    
+    return render_template('register.html')
 
-    return app
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE username = ?", (username,))
+        user = c.fetchone()
+        conn.close()
+        
+        if user and check_password_hash(user[2], password):
+            session['user_id'] = user[0]
+            session['username'] = user[1]
+            return redirect(url_for('dashboard'))
+        else:
+            flash('Неверный логин или пароль', 'error')
+    
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('index'))
+
+@app.route('/dashboard')
+def dashboard():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    return render_template('dashboard.html', username=session['username'])
+
+@app.route('/verify', methods=['POST'])
+def verify():
+    if 'user_id' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    if model is None:
+        return jsonify({'error': 'Модель не загружена. Запустите обучение.'}), 500
+    
+    if 'file1' not in request.files or 'file2' not in request.files:
+        return jsonify({'error': 'Нет файлов'}), 400
+    
+    file1 = request.files['file1']
+    file2 = request.files['file2']
+    
+    if file1.filename == '' or file2.filename == '':
+        return jsonify({'error': 'Файлы не выбраны'}), 400
+    
+    path1 = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file1.filename))
+    path2 = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file2.filename))
+    
+    file1.save(path1)
+    file2.save(path2)
+    
+    try:
+        img1 = preprocess_image(path1)
+        img2 = preprocess_image(path2)
+        
+        if img1 is None or img2 is None:
+            return jsonify({'error': 'Ошибка обработки изображения. Убедитесь, что это картинка.'}), 400
+        
+        prediction = model.predict([img1, img2], verbose=0)[0][0]
+        similarity = float(prediction)
+        
+        # Удаляем файлы после обработки
+        os.remove(path1)
+        os.remove(path2)
+        
+        result_text = "ПОДПИСИ СОВПАДАЮТ" if similarity > 0.5 else "ПОДПИСИ РАЗНЫЕ"
+        confidence = "Высокая" if (similarity > 0.8 or similarity < 0.2) else "Средняя"
+        
+        return jsonify({
+            'similarity': round(similarity * 100, 2),
+            'result': result_text,
+            'confidence': confidence,
+            'raw_score': similarity
+        })
+        
+    except Exception as e:
+        # Чистим файлы в случае ошибки
+        if os.path.exists(path1): os.remove(path1)
+        if os.path.exists(path2): os.remove(path2)
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app = create_app()
     app.run(debug=True)
