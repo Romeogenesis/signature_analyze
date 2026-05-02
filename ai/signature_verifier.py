@@ -1,16 +1,14 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import keras
+from keras.models import load_model
 from PIL import Image
 import cv2
 import numpy as np
 import os
 
 class SignatureVerifier:
-    """Сервис для верификации подписей с использованием обученной Siamese-сети"""
+    """Сервис для верификации подписей с использованием обученной Siamese-сети (Keras)"""
     
-    def __init__(self, model_path='ai/models/siamese_model.pth', img_size=(144, 144)):
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    def __init__(self, model_path='signature_model.keras', img_size=(150, 150)):
         self.img_size = img_size
         self.model = None
         
@@ -19,15 +17,12 @@ class SignatureVerifier:
             self.load_model(model_path)
         else:
             print(f"Warning: Модель не найдена по пути {model_path}")
-            print("Запустите обучение: python ai/train_siamese.py")
+            print("Запустите обучение: python train_model.py")
     
     def load_model(self, model_path):
-        """Загрузка обученной модели"""
-        from siamese_network import SiameseNetwork
-        self.model = SiameseNetwork().to(self.device)
-        self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-        self.model.eval()
-        print(f"Модель загружена с {self.device}")
+        """Загрузка обученной модели Keras"""
+        self.model = load_model(model_path)
+        print(f"Модель загружена: {model_path}")
     
     def preprocess_image(self, img_path):
         """Предобработка изображения для подачи в модель"""
@@ -47,11 +42,10 @@ class SignatureVerifier:
         
         # Нормализация
         img = img.astype(np.float32) / 255.0
-        img = (img - img.mean()) / (img.std() + 1e-7)
         
-        # Преобразование в тензор (B, C, H, W)
-        img = torch.from_numpy(img).unsqueeze(0).unsqueeze(0)
-        img = img.to(self.device)
+        # Преобразование в тензор (B, H, W, C) для Keras/TensorFlow
+        img = np.expand_dims(img, axis=-1)  # Добавляем канал
+        img = np.expand_dims(img, axis=0)   # Добавляем батч
         
         return img
     
@@ -73,22 +67,19 @@ class SignatureVerifier:
         img2 = self.preprocess_image(img_path2)
         
         # Предсказание
-        with torch.no_grad():
-            enc1, enc2 = self.model(img1, img2)
-            similarity = F.cosine_similarity(enc1, enc2).item()
+        prediction = self.model.predict([img1, img2], verbose=0)[0][0]
         
-        # Конвертация схожести (-1 до 1) в проценты (0 до 100)
-        similarity_percent = ((similarity + 1) / 2) * 100
+        # prediction - это вероятность совпадения (0-1)
+        similarity_percent = float(prediction) * 100
         
-        # Определение порога (настраивается экспериментально)
-        threshold = 0.7  # Косинусное сходство > 0.7 считаем совпадением
-        is_match = similarity > threshold
+        # Определение порога
+        threshold = 0.5  # Сигмоида > 0.5 считаем совпадением
+        is_match = float(prediction) > threshold
         
         # Уровень уверенности
-        abs_sim = abs(similarity)
-        if abs_sim > 0.8:
+        if float(prediction) > 0.8 or float(prediction) < 0.2:
             confidence = 'high'
-        elif abs_sim > 0.5:
+        elif float(prediction) > 0.6 or float(prediction) < 0.4:
             confidence = 'medium'
         else:
             confidence = 'low'
@@ -97,12 +88,12 @@ class SignatureVerifier:
             'similarity': round(similarity_percent, 2),
             'is_match': is_match,
             'confidence': confidence,
-            'raw_similarity': similarity
+            'raw_prediction': float(prediction)
         }
 
 
 # Для совместимости с веб-приложением
-def verify_signatures(file1_path, file2_path, model_path='ai/models/siamese_model.pth'):
+def verify_signatures(file1_path, file2_path, model_path='signature_model.keras'):
     """Удобная функция для вызова из веб-приложения"""
     verifier = SignatureVerifier(model_path=model_path)
     return verifier.verify(file1_path, file2_path)
