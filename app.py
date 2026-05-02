@@ -124,7 +124,7 @@ def create_app():
                 result = None
                 if AI_AVAILABLE:
                     try:
-                        model_path = 'ai/models/siamese_model.pth'
+                        model_path = 'signature_model.keras'
                         result = verify_signatures(file1_path, file2_path, model_path=model_path)
                     except Exception as e:
                         flash(f'Ошибка при проверке нейросетью: {e}')
