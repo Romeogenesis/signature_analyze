@@ -1,8 +1,15 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, session
 from config import Config
 from models.signature_db import db, User, Signature
-from services.signature_verification import verify_two_signatures
 import base64
+
+# Импорт сервиса верификации подписей на основе Siamese сети
+try:
+    from ai.signature_verifier import get_verifier
+    AI_AVAILABLE = True
+except (ImportError, FileNotFoundError):
+    AI_AVAILABLE = False
+    print("⚠️  AI-сервис недоступен. Запустите сначала: python ai/train_siamese.py")
 
 def create_app():
     app = Flask(__name__)
@@ -99,7 +106,18 @@ def create_app():
                 db.session.commit()
 
                 # Проверяем подписи с помощью ИИ
-                result = verify_two_signatures(file1_data, file2_data)
+                if AI_AVAILABLE:
+                    verifier = get_verifier('models/signature_siamese.pth')
+                    result = verifier.verify_signatures_from_bytes(
+                        base64.b64decode(file1_data),
+                        base64.b64decode(file2_data)
+                    )
+                else:
+                    # Резервный эвристический метод если модель не обучена
+                    from services.signature_verification import verify_two_signatures
+                    result = verify_two_signatures(file1_data, file2_data)
+                    result['similarity'] = result.get('similarity', 50.0)
+                    result['threshold'] = result.get('threshold', 50.0)
 
                 return render_template('result.html', 
                                        is_match=result['is_match'],
